@@ -7,12 +7,52 @@ import requests
 import boto3
 from botocore.exceptions import ClientError
 
+default_wait_time_for_apache_wakeup = 600
+app_retry_wait_time = 60
+
+def retry_step(func):
+    def retry_step_wrapper(*args, **kwargs):
+        max_retries = 10
+        current_attempt = 0
+        wait_time = app_retry_wait_time  # seconds
+        while current_attempt < max_retries:
+            try:
+                # App level errors may return a 200; so built in retries in HTTPAdapter are not helpful
+                if func.__name__ == "login":
+                    response, api_token = func(*args, **kwargs)
+                else:
+                    response = func(*args, **kwargs)
+                logging.info("Check if response from controller return is False")
+                logging.info(response)
+                assert response != None
+                if not response.json().get(
+                    "return", False
+                ) and "already exists" not in response.json().get("reason", ""):
+                    logging.info(response.json())
+                    logging.info(
+                        f"need to retry {func.__name__} {current_attempt+1}/{max_retries}"
+                    )
+                    current_attempt += 1
+                    time.sleep(wait_time)
+                else:
+                    if func.__name__ == "login":
+                        return (response, api_token)
+                    else:
+                        return response
+            except AssertionError:
+                logging.error(
+                    "Response object is of NoneType; no response from controller on initial_setup"
+                )
+                return None
+    retry_step_wrapper.original = func
+    return retry_step_wrapper
+
 
 class AviatrixException(Exception):
     def __init__(self, message="Aviatrix Error Message: ..."):
         super(AviatrixException, self).__init__(message)
 
-
+@retry_step
 def add_ingress_rules(
         aws_access_key,
         aws_secret_access_key,
@@ -123,7 +163,7 @@ def send_aviatrix_api(
 
     return response
 
-
+@retry_step
 def login_controller(
         controller_ip,
         username,
@@ -194,7 +234,7 @@ def verify_controller_login_response(response=None):
             message=err_msg,
         )
 
-
+@retry_step
 def login_copilot(
         controller_ip,
         copilot_ip,
@@ -234,7 +274,7 @@ def login_copilot(
 
     return response
 
-
+@retry_step
 def init_copilot(
         controller_username,
         controller_password,
@@ -280,7 +320,7 @@ def init_copilot(
 
     return response
 
-
+@retry_step
 def get_copilot_init_status(
         copilot_ip,
         CID,
